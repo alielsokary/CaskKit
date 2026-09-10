@@ -1,6 +1,6 @@
 name: Extract icons
 
-# PNGs and icon_report.json share the icons branch and a single writer.
+# PNGs, icons.json, and icon_report.json share the icons branch and a single writer.
 on:
   workflow_dispatch:
     inputs:
@@ -60,9 +60,9 @@ jobs:
             python3 scripts/extract_icons.py --publish --limit "$LIMIT"
           fi
 
-      # The daily release (14:47 UTC) predates this run, and iconTokens is
-      # stamped at release time - without this, today's icons ship tomorrow.
-      - name: Cut data release with the fresh icon manifest
+      # Keep legacy iconTokens and app identities fresh for existing consumers.
+      # Independent icons.json is already published; it does not wait for this release.
+      - name: Refresh legacy category metadata
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run release.yml

@@ -16,6 +16,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+from style_standards import write_json
+
 from app_identities import MANIFEST, merge_extractions, needs_refresh, record_extraction
 
 from icons_state import (  # noqa: F401  (re-exported for curate_icons/tests)
@@ -508,14 +510,57 @@ def publish_batch(pngs: dict[str, Path], report: dict[str, dict],
         _merge_report(wt, report, dirty)
         if identity_file is not None:
             merge_extractions(wt / MANIFEST, identity_file, dirty)
-        _git(wt, "add", "-A")
+        if _git(wt, "add", "-A").returncode != 0:
+            raise ExtractError("Cannot stage icons")
+        write_icon_manifest(wt)
+        if _git(wt, "add", "icons.json").returncode != 0:
+            raise ExtractError("Cannot stage icons.json")
         if _git(wt, "diff", "--cached", "--quiet").returncode == 0:
             return  # everything already on the branch
+        changed = _git(wt, "diff", "--cached", "--name-only", "--diff-filter=AM", "--", "*.png", "icons.json")
+        if changed.returncode != 0:
+            raise ExtractError("Cannot determine changed icons for CDN purge")
         _commit_and_push(wt, pngs)
+        for filename in changed.stdout.splitlines():
+            purge_file(filename)
     finally:
         if wt_added:
             _git(REPO_ROOT, "worktree", "remove", "--force", str(wt))
         shutil.rmtree(wt, ignore_errors=True)
+
+
+def write_icon_manifest(wt: Path) -> None:
+    """Describe the staged PNGs, so manifest and images publish in one commit."""
+    index = _git(wt, "ls-files", "--stage", "-z", "--", "*.png")
+    if index.returncode != 0:
+        raise ExtractError("Cannot read staged icons for icons.json")
+    hashes = {}
+    for entry in index.stdout.split("\0"):
+        if not entry:
+            continue
+        info, path = entry.split("\t", 1)
+        mode, sha, stage = info.split()
+        if stage != "0":
+            raise ExtractError("Cannot publish icons with unresolved conflicts")
+        if mode in ("100644", "100755") and "/" not in path:
+            hashes[Path(path).stem] = sha
+    write_json(wt / "icons.json", {"version": 1, "hashes": dict(sorted(hashes.items()))})
+
+
+def purge_file(filename: str) -> None:
+    """Refresh a mutable CDN file; failure must not undo a successful push."""
+    url = f"https://purge.jsdelivr.net/gh/alielsokary/CaskFlow@{ICONS_BRANCH}/{filename}"
+    try:
+        with urlopen(url, timeout=15) as response:  # nosec B310 - fixed HTTPS scheme and jsDelivr host
+            result = json.load(response)
+        paths = result.get("paths", {})
+        if result.get("status") != "finished" or not paths or any(
+            entry.get("throttled") or not entry.get("providers")
+            or not all(entry["providers"].values()) for entry in paths.values()
+        ):
+            raise ValueError(f"purge incomplete: {result}")
+    except Exception as error:
+        print(f"warning: CDN purge failed for {filename}: {error}; retry {url}")
 
 
 def _add_icons_worktree(wt: Path) -> None:

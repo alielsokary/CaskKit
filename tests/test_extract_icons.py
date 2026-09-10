@@ -387,3 +387,60 @@ def test_main_retry_parked_all_fail_stays_green(monkeypatch, tmp_path):
         "t0": {"status": "failed", "reason": "x", "attempts": 3, "updated": "2026-07-11"}})
     monkeypatch.setattr(extract_icons, "_extract_status", lambda c, o: ("failed", "boom"))
     assert extract_icons.main(["--output-dir", str(tmp_path), "--retry-parked"]) == 0
+
+
+def test_publish_manifest_and_purge_only_changed_files_after_push(monkeypatch, tmp_path):
+    import json
+    import subprocess
+
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(wt), *args], text=True).strip()
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
+    (wt / "antinote.png").write_bytes(b"old")
+    (wt / "unchanged.png").write_bytes(b"same")
+    git("add", "-A")
+    git("commit", "-qm", "initial")
+    events = []
+    monkeypatch.setattr(extract_icons.tempfile, "mkdtemp", lambda **_: str(wt))
+    monkeypatch.setattr(extract_icons, "_add_icons_worktree", lambda _: None)
+    monkeypatch.setattr(extract_icons, "_merge_report", lambda *_: None)
+    monkeypatch.setattr(extract_icons.shutil, "rmtree", lambda *a, **k: None)
+
+    def push(*_):
+        git("commit", "-qm", "publish")
+        manifest = json.loads(git("show", "HEAD:icons.json"))
+        assert manifest == {"version": 1, "hashes": {
+            "antinote": git("rev-parse", "HEAD:antinote.png"),
+            "unchanged": git("rev-parse", "HEAD:unchanged.png"),
+        }}
+        events.append("push")
+    monkeypatch.setattr(extract_icons, "_commit_and_push", push)
+    monkeypatch.setattr(extract_icons, "purge_file", events.append)
+    png = tmp_path / "antinote.png"
+    png.write_bytes(b"new")
+    extract_icons.publish_batch({"antinote": png}, {}, set())
+    assert events == ["push", "antinote.png", "icons.json"]
+    events.clear()
+    extract_icons.publish_batch({"antinote": png}, {}, set())
+    assert events == []  # Unchanged bytes: no commit or purge.
+    png.write_bytes(b"newer")
+
+    def failed_push(*_):
+        raise ExtractError("push failed")
+    monkeypatch.setattr(extract_icons, "_commit_and_push", failed_push)
+    with pytest.raises(ExtractError, match="push failed"):
+        extract_icons.publish_batch({"antinote": png}, {}, set())
+    assert events == []
+
+
+def test_purge_failure_warns_without_failing_publication(monkeypatch, capsys):
+    def unavailable(*args, **kwargs):
+        raise OSError("offline")
+    monkeypatch.setattr(extract_icons, "urlopen", unavailable)
+    extract_icons.purge_file("antinote.png")
+    assert "warning: CDN purge failed for antinote" in capsys.readouterr().out

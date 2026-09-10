@@ -10,10 +10,36 @@ https://cdn.jsdelivr.net/gh/alielsokary/CaskFlow@icons/<token>.png     (primary 
 https://raw.githubusercontent.com/alielsokary/CaskFlow/icons/<token>.png   (fallback)
 ```
 
-256×256 PNG per cask token, published once (icons are not re-extracted on
-version bumps). jsDelivr caches branch refs for 12h at the edge and mirrors
+256×256 PNG per cask token. Scheduled runs skip existing icons; explicit
+`--tokens` re-extracts them. Publishing purges changed PNGs from jsDelivr;
+purge failures are reported without undoing publication. jsDelivr caches branch refs for 12h at the edge and mirrors
 served files permanently to its own storage; new icons are visible within
 minutes on first request, cached aggressively thereafter.
+
+The independent `icons.json` on the `icons` branch contains
+`{"version": 1, "hashes": {"<token>": "<Git blob SHA-1>"}}`. It is generated
+from the staged PNGs and committed alongside them on every publication, including
+selective runs. No category release is needed. Existing `iconTokens` in category
+releases stays available for older consumers; hashes are not added to categories.
+
+Manifest URL: `https://raw.githubusercontent.com/alielsokary/CaskFlow/icons/icons.json`.
+The same path is also available through jsDelivr. After a successful push, CI
+purges only changed PNG URLs and the manifest if it changed. A selective run for
+one changed icon purges that icon, not the entire collection. Unchanged images
+are not purged, and purge failures warn without undoing publication.
+
+Consumers refresh the manifest independently, compare saved hashes, and fetch
+only changed icons using the existing URLs. Verify SHA-1 of
+`blob <byte-count>\0` followed by the original PNG bytes before replacing a cached
+icon. On network errors or mismatches, retain the previous icon and retry later:
+mutable CDN content can temporarily lag behind the manifest. A CDN purge cannot
+clear a consumer's local cache. Missing or unsupported manifests should preserve
+legacy loading behavior, or the last successfully loaded manifest.
+
+CaskHub checks on startup and on foreground activation (at most once per 15
+minutes). Health > Sync now bypasses that interval and retries visible stale
+icons, even if their advertised hashes have not changed. Failed downloads also
+retry on a subsequent image load; there is no continuous background polling.
 
 ## Protocol (per cask)
 
